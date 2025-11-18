@@ -1,8 +1,5 @@
-with Interfaces.STM32.RCC;  use Interfaces.STM32.RCC;
-with Interfaces.STM32.GPIO; use Interfaces.STM32.GPIO;
-
-with Board;
-pragma Unreferenced (Board);
+with stm32g431.RCC;  use stm32g431.RCC;
+with stm32g431.GPIO; use stm32g431.GPIO;
 
 package body Last_Chance_Handler is
 

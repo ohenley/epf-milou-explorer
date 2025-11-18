@@ -13,8 +13,6 @@ executables = ["xplorer"]
 
 [[depends-on]]
 milou = "*"
-light_tasking_stm32g431 = "*"
-nucleo_g431kb = "*"
 gnat_arm_elf = "*"
 
 [[pins]]

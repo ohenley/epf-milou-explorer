@@ -1,5 +1,8 @@
-with board;
+with Milou; use Milou;
 procedure Xplorer is
 begin
-   null;
+   Init_Test_Clock;
+   loop
+      null;
+   end loop;
 end Xplorer;

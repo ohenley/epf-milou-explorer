@@ -10,6 +10,7 @@ website = ""
 tags = []
 
 [[depends-on]]
-light_tasking_stm32g431 = "*"
-gnat_arm_elf = "*"
+nucleo_g431kb = "*"
 
+[[pins]]
+nucleo_g431kb = { path = "/home/henley/Desktop/stm32_dev/nucleo_g431kb"}
