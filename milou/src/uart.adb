@@ -64,8 +64,9 @@ package body Uart is
       USART2_Periph.CR3.CTSE := 0;
 
       -- 115200 baud @ 170 MHz
-      USART2_Periph.BRR.DIV_Mantissa := 1475;
-      USART2_Periph.BRR.DIV_Fraction := 11;
+      USART2_Periph.PRESC.PRESCALER := 0;
+      USART2_Periph.BRR.DIV_Mantissa := 92;
+      USART2_Periph.BRR.DIV_Fraction := 4;  
 
       USART2_Periph.CR1.TE := 1;
       USART2_Periph.CR1.RE := 1;
