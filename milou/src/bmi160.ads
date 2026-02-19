@@ -1,3 +1,305 @@
+Latest plan from chat:
+
+Good choice of architecture: **one dedicated acquisition task + one protected object as the “latest sample mailbox”** is exactly how you decouple timing-sensitive sensor IO from the rest of the system (and it fits Jorvik/Ravenscar-style profiles very well).
+
+Below is a **practical, end-to-end mental model** for a *minimal but correct* BMI160 driver.
+
+---
+
+## 0. What you’re really building
+
+Three layers:
+
+1. **Bus layer (I2C or SPI)**
+
+   * Knows how to `Read_Register`, `Write_Register`, maybe `Read_Burst`.
+   * No BMI160 logic here.
+
+2. **Device driver (BMI160)**
+
+   * Knows registers, reset sequence, config, data layout.
+   * Exposes:
+
+     * `Initialize`
+     * `Configure`
+     * `Read_Raw` (or internal read used by task)
+
+3. **Concurrency wrapper**
+
+   * A **task** that periodically polls the sensor.
+   * A **protected object** that stores the *latest sample*.
+   * The rest of the system just calls `Get_Latest`.
+
+This keeps:
+
+* Timing + IO in one place
+* The rest of your code lock-free and simple
+
+---
+
+## 1. Things you must know from the BMI160 datasheet
+
+At minimum:
+
+* **Who am I register** (chip ID)
+  → To verify the device is present.
+
+* **Reset sequence**
+  → BMI160 has a soft reset command and *requires delay after reset*.
+
+* **Power mode registers**
+  → You must put:
+
+  * Accelerometer into normal mode
+  * Gyro into normal mode
+    Otherwise reads return junk or zeros.
+
+* **Config registers**
+
+  * Accel range (±2g, ±4g, …)
+  * Gyro range (±125 dps, ±250 dps, …)
+  * ODR (output data rate)
+  * Optional: bandwidth / filter
+
+* **Data registers layout**
+
+  * Burst read starting at accel X LSB
+  * Order: Accel XYZ, Gyro XYZ (and maybe temp)
+  * Each axis = 16-bit signed
+
+* **Timing constraints**
+
+  * Delay after reset
+  * Delay after switching power modes
+  * Minimum time between reads vs ODR
+
+You don’t need FIFO, interrupts, advanced features for a *basic* driver.
+
+---
+
+## 2. Minimal register-level flow
+
+### Initialization sequence (conceptual)
+
+1. Read `CHIP_ID`
+
+   * If not expected value → error
+
+2. Soft reset
+
+   * Write reset command
+   * Delay (e.g. 100 ms)
+
+3. Put accel + gyro in normal mode
+
+   * Write power control registers
+   * Delay (e.g. 50 ms)
+
+4. Configure:
+
+   * Accel range
+   * Gyro range
+   * ODR / bandwidth
+
+5. Ready to read data
+
+---
+
+## 3. What the task does
+
+Your **Jorvik task** is the *only* thing that talks to the sensor after init.
+
+Pseudo-behavior:
+
+```
+task Sensor_Task is
+begin
+   Initialize_BMI160;
+
+   loop
+      Read 12 or 14 bytes starting at DATA_START;
+      Convert bytes -> Int16 XYZ accel, XYZ gyro;
+      Protected_Buffer.Update (Sample);
+      delay until Next_Release;  -- based on desired sample rate
+   end loop;
+end Sensor_Task;
+```
+
+Key points:
+
+* The task:
+
+  * Owns the bus for this device
+  * Owns timing
+  * Handles retries / transient errors if you want
+* Nobody else touches the BMI160 directly.
+
+---
+
+## 4. What the protected object does
+
+This is just a **single-slot mailbox**:
+
+* Stores:
+
+  * Latest accel
+  * Latest gyro
+  * Maybe timestamp
+  * Maybe a validity flag
+
+Example semantics:
+
+* `procedure Update (S : Sample)`
+
+  * Overwrites previous sample
+
+* `procedure Get (S : out Sample)`
+
+  * Returns latest sample (non-blocking)
+  * Always O(1), no waiting
+
+This gives you:
+
+* Lock-free semantics for consumers
+* No queue growth
+* “Latest wins” behavior (perfect for control loops, UI, logging, etc.)
+
+---
+
+## 5. Data types you should define
+
+At driver boundary:
+
+* `type Axis is range -32768 .. 32767;` (or `Integer_16`)
+* `type Accel_3D is record X, Y, Z : Axis; end record;`
+* `type Gyro_3D  is record X, Y, Z : Axis; end record;`
+
+At system boundary:
+
+* Maybe also scaled physical units later (m/s², dps), but **start raw**.
+
+---
+
+## 6. Error handling strategy (keep it simple)
+
+Minimum viable:
+
+* On init:
+
+  * If CHIP_ID wrong → set a status flag and stop task or retry forever
+
+* On read:
+
+  * If bus error → skip update, keep last sample
+
+Your protected object can also carry:
+
+* `Valid : Boolean`
+* `Error_Count : Natural`
+
+So the main brain can detect “sensor dead” vs “data fresh”.
+
+---
+
+## 7. Timing: how fast should the task run?
+
+* Pick a **poll period** consistent with ODR:
+
+  * If ODR = 100 Hz → poll at 100 Hz or 200 Hz
+* Use:
+
+  * `delay until Next_Time;` (not `delay X;`)
+* Jorvik/Ravenscar likes **periodic tasks** with explicit timing → perfect fit.
+
+---
+
+## 8. What “basic driver” means in practice
+
+You do **NOT** need initially:
+
+* FIFO
+* Interrupts
+* Step counter
+* Motion detection
+* Calibration logic
+* Fancy filtering
+
+Your MVP:
+
+* Reset
+* Power up accel + gyro
+* Configure ranges
+* Burst read raw data
+* Publish latest sample
+
+That’s it.
+
+---
+
+## 9. Clean separation of responsibilities
+
+**Bus package (HAL)**
+
+* `Write (Reg, Value)`
+* `Read (Reg) return Byte`
+* `Read_Burst (Start_Reg, Buf)`
+
+**BMI160 driver package**
+
+* Knows register addresses and bit fields
+* Implements:
+
+  * `Initialize`
+  * `Configure`
+  * `Read_Raw (Accel, Gyro)`
+
+**Acquisition task**
+
+* Calls driver
+* Pushes into protected buffer
+* Owns timing
+
+**Protected buffer**
+
+* Owns data
+* Offers `Get_Latest`
+
+---
+
+## 10. Why this architecture is “right”
+
+* Deterministic timing (task)
+* No blocking in consumers (protected object)
+* No data races
+* No bus contention
+* Scales to:
+
+  * Logging task
+  * Control loop task
+  * UI task
+    All reading the same “latest” sample safely.
+
+---
+
+## 11. If you want, next step
+
+I can give you:
+
+* A **clean Ada package spec** for:
+
+  * `BMI160_Driver`
+  * `BMI160_Buffer` (protected object)
+  * `BMI160_Task`
+* With Ravenscar/Jorvik-compatible patterns
+* And register names instead of magic numbers
+
+Just say: *“Give me the .ads skeletons”* and I’ll keep it tight and minimal.
+
+
+
+
+
+
 --  Below is the *executive-level “story”* of the BMI160, exactly what you need before writing a minimal Ada driver: what matters, what to ignore, which registers are essential, and what the shortest possible bootstrap path looks like for a functional 6-DoF IMU reading loop.
 
 --  I will intentionally not drown you in the entire IC feature set (FIFO, interrupts, step counter, tap detection, FIFO watermark, power optimization, fast offsets…). The goal is: *get accelerometer + gyro working, stable, predictable, testable,* and *structured for later expansion*.
